@@ -1,6 +1,4 @@
-﻿// Astar.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
-
+﻿
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -14,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+
 using namespace std;
 
 struct Edge
@@ -23,7 +22,7 @@ struct Edge
     int idOfNode;//id noda z ktorego ide
     int idOfPreviusNode;//id do ktorego ide
 
-    bool operator < (const Edge& e) const
+    __device__ __host__ bool operator < (const Edge& e) const
     {
         return weight < e.weight;
     }
@@ -38,7 +37,6 @@ struct Coord
 
 struct Node
 {
-    string name;
     int numberOfEdges;
     int* idsOfNeighbor;//tablica z id'kami sasiadow
     double* weightOfEdges;//tablica z wagami krawedzi do sasiadow
@@ -47,7 +45,7 @@ struct Node
 int getIndexOfNodeByName(vector<string> namesOfNodes, string name);
 double calcHeuristicValue(int x1, int y1, int x2, int y2);
 double calcHeuristicValue(int x1, int y1);
-double getWeightFromStartForNode(vector<Edge> edges, int idOfNode);
+double getWeightFromStartForNode(thrust::host_vector<Edge> edges, int idOfNode);
 bool isEdgeIsOpened(vector<Edge> edges, int idOfNode);
 int getIndexOfEdge(vector<Edge> edges, int idOfNode);
 
@@ -61,8 +59,9 @@ int main(int argc, char* argv[])
     vector<string> namesOfNodes;//nazwy - etykiety nodow
     Coord* coords;
     vector<Node> nodes;//wektor z node'ami
-    vector<Edge> openEdges;//wekstor z otwartymi akutalnie krawedziami
-    vector<Edge> checkedEdges;//sprawdzone krawedzie
+    thrust::host_vector<Edge> openEdges;//wekstor z otwartymi akutalnie krawedziami
+    thrust::host_vector<Edge> checkedEdges;//sprawdzone krawedzie
+    thrust::host_vector<Edge>::iterator itr;//iterator potrzebny do szukania w wektorach
 
     ////CZYTANIE Z PLIKU
 
@@ -81,7 +80,6 @@ int main(int argc, char* argv[])
             Node tmpNode;
             inputFile >> inputString;
             namesOfNodes.push_back(inputString);
-            tmpNode.name = inputString;
             inputFile >> inputString;
             coords[i].x = stoi(inputString);
             inputFile >> inputString;
@@ -120,7 +118,7 @@ int main(int argc, char* argv[])
     int indexOfCurrentNode = indexOfStartNode;
     openEdges.push_back({ 0,0,indexOfStartNode,0 });//dodaje poczatek grafu to otwarych krawedzi
 
-      //Zmienne CUDA
+    //Zmienne CUDA
     int* finishX_D;
     int* finishY_D;
     int* numberOfPoints_D;
@@ -138,7 +136,6 @@ int main(int argc, char* argv[])
     cudaMalloc((void**)&heuristicValue_D, sizeof(double) * nodes.front().numberOfEdges);
     cudaMalloc((void**)&coordsX_D, sizeof(int) * nodes.front().numberOfEdges);
     cudaMalloc((void**)&coordsY_D, sizeof(int) * nodes.front().numberOfEdges);
-
     do
     {
         checkedEdges.push_back(openEdges.front());//dorzucam krawedz do sprawdzonych
@@ -161,11 +158,10 @@ int main(int argc, char* argv[])
         cudaMemcpy(coordsY_D, coordsY, sizeof(int) * currentNode.numberOfEdges, cudaMemcpyHostToDevice);
 
 
-        calcHeuristicValues << <1, 500 >> > (coordsX_D, coordsY_D, heuristicValue_D, finishX_D, finishY_D, numberOfPoints_D);
+        calcHeuristicValues << <3, 850 >> > (coordsX_D, coordsY_D, heuristicValue_D, finishX_D, finishY_D, numberOfPoints_D);
         cudaDeviceSynchronize();
         cudaMemcpy(heuristicValue, heuristicValue_D, sizeof(double) * currentNode.numberOfEdges, cudaMemcpyDeviceToHost);
         //
-
         for (int i = 0; i < currentNode.numberOfEdges; i++)
         {
             Edge tmpEdge;//tworze tymczasowa krawedz
@@ -174,35 +170,42 @@ int main(int argc, char* argv[])
             tmpEdge.weightFromStart = weightFromStartOfCurrentNode + currentNode.weightOfEdges[i];//obliczam rzeczywista wage od startu do sasiada
             tmpEdge.weight = tmpEdge.weightFromStart + calcHeuristicValue(coords[tmpEdge.idOfNode].x, coords[tmpEdge.idOfNode].y, coords[indexOfFinishNode].x, coords[indexOfFinishNode].y);
 
-            if (isEdgeIsOpened(openEdges, tmpEdge.idOfNode)) //sprawdzam czy ta krawedzi jest juz w wektorze otwartych
-            {
-                int iterator = getIndexOfEdge(openEdges, tmpEdge.idOfNode);//jak tak to sprawdzam gdzie jest
+            itr = thrust::find_if(openEdges.begin(), openEdges.end(), [&tmpEdge](Edge e) {return e.idOfNode == tmpEdge.idOfNode; });
 
-                if (openEdges.at(iterator).weight > tmpEdge.weight)//jezeli jej waga w wektorze jest wieksza to podmieniam ja na tanszy odpowiednik
+            if (itr != openEdges.end()) //sprawdzam czy ta krawedzi jest juz w wektorze otwartych
+            {
+                if (itr.base()->weight > tmpEdge.weight)//jezeli jej waga w wektorze jest wieksza to podmieniam ja na tanszy odpowiednik - uzywam iteratora bo to zapewnia turbo 
                 {
-                    openEdges.at(iterator) = tmpEdge;
+                    *itr = tmpEdge;
                 }
             }
-            else if (isEdgeIsOpened(checkedEdges, tmpEdge.idOfNode)) //sprawdzam czy ta krawedzi jest juz w wektorze sprawdzonych
+            else //jezeli nie to
             {
-                int iterator = getIndexOfEdge(checkedEdges, tmpEdge.idOfNode);//jak tak to sprawdzam gdzie jest
+                itr = thrust::find_if(checkedEdges.begin(), checkedEdges.end(), [&tmpEdge](Edge e) {return e.idOfNode == tmpEdge.idOfNode; });
 
-                if (checkedEdges.at(iterator).weight > tmpEdge.weight)//jezeli jej waga w wektorze jest wieksza to podmieniam ja na tanszy odpowiednik
+                if (itr != checkedEdges.end()) //sprawdzam czy ta krawedzi jest juz w wektorze sprawdzonych
                 {
-                    checkedEdges.at(iterator) = tmpEdge;
+                    if (itr.base()->weight > tmpEdge.weight)//jezeli jej waga w wektorze jest wieksza to podmieniam ja na tanszy odpowiednik - uzywam iteratora bo to zapewnia turbo 
+                    {
+                        *itr = tmpEdge;
+                    }
                 }
-            }
-            else
-            {
-                openEdges.push_back(tmpEdge);
+                else //jezeli nie ma jej w zadnym zbiorze to dorzucam ja do otwartych 
+                {
+                    openEdges.push_back(tmpEdge);
+                }
             }
         }
 
 
         openEdges.erase(openEdges.begin());//usuwam sprawdzona krawedz z wektora
-        sort(openEdges.begin(), openEdges.end());//sortuje krawedzie do odwiedzenia
+        thrust::device_vector<Edge> openEdges_D = openEdges;
+        //thrust::sort(openEdges.begin(), openEdges.end());//sortuje krawedzie do odwiedzenia
+        thrust::sort(openEdges_D.begin(), openEdges_D.end());//sortuje krawedzie do odwiedzenia
+        openEdges = openEdges_D;
 
-        indexOfCurrentNode = openEdges.front().idOfNode;//biore id najtanszej krawedzi
+        Edge e = openEdges.front();
+        indexOfCurrentNode = e.idOfNode;//biore id najtanszej krawedzi
         if (indexOfCurrentNode == indexOfFinishNode)//sprawdzam czy nie jest ona celem 
         {
             checkedEdges.push_back(openEdges.front());//jak tak to dodaje do odwiedzonych
@@ -223,7 +226,7 @@ int main(int argc, char* argv[])
     {
         cout << namesOfNodes.at(currentEdge.idOfPreviusNode) << endl;//wyswietam nazwe poprzednika
         int idOfPreviusNode = currentEdge.idOfPreviusNode;
-        currentEdge = checkedEdges.at(getIndexOfEdge(checkedEdges, idOfPreviusNode));
+        currentEdge = *thrust::find_if(checkedEdges.begin(), checkedEdges.end(), [&idOfPreviusNode](Edge e) { return e.idOfNode == idOfPreviusNode; }).base();
     } while (currentEdge.idOfNode != indexOfStartNode);//dopoki nie spotkam sie z pierwszym
 
 
@@ -267,31 +270,34 @@ double calcHeuristicValue(int x1, int y1, int x2, int y2)
     return sqrt(pow(((double)x2 - (double)x1), 2) + pow(((double)y2 - (double)y1), 2));
 }
 
-double getWeightFromStartForNode(vector<Edge> edges, int idOfNode)
+double getWeightFromStartForNode(thrust::host_vector<Edge> edges, int idOfNode)
 {
     for (int i = 0; i < edges.size(); i++)
     {
-        if (edges.at(i).idOfNode == idOfNode) return edges.at(i).weightFromStart;
+        Edge e = edges[i];
+        if (e.idOfNode == idOfNode) return e.weightFromStart;
     }
 
     return 0;
 }
 
-bool isEdgeIsOpened(vector<Edge> edges, int idOfNode)
+bool isEdgeIsOpened(thrust::host_vector<Edge> edges, int idOfNode)
 {
     for (int i = 0; i < edges.size(); i++)
     {
-        if (edges.at(i).idOfNode == idOfNode) return true;
+        Edge e = edges[i];
+        if (e.idOfNode == idOfNode) return true;
     }
 
     return false;
 }
 
-int getIndexOfEdge(vector<Edge> edges, int idOfNode)
+int getIndexOfEdge(thrust::host_vector<Edge> edges, int idOfNode)
 {
     for (int i = 0; i < edges.size(); i++)
     {
-        if (edges.at(i).idOfNode == idOfNode) return i;
+        Edge e = edges[i];
+        if (e.idOfNode == idOfNode) return i;
     }
 
     return 0;
